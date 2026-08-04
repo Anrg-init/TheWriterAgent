@@ -1,0 +1,9 @@
+langchain
+langgraph
+langchain-community
+langchain-google-genai
+google-generativeai
+huggingface_hub
+python-dotenv
+requests
+fastapi
