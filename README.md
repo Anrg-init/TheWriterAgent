@@ -4,19 +4,24 @@
 
 ---
 
-## 🚀 Features
+## 📸 Demo
 
-- 🤖 Multi-Agent workflow using LangGraph
-- 🌐 Optional web research with Tavily
-- 📝 Intelligent blog planning & outlining
-- ✍️ Section-by-section content generation
-- 🖼️ AI image generation
-- 📄 Markdown export
-- 🎨 Streamlit UI
+> ![alt text](image.png)
+
+
+##  Features
+
+-  Multi-Agent workflow using LangGraph
+-  Optional web research with Tavily
+-  Intelligent blog planning & outlining
+-  Section-by-section content generation
+-  AI image generation
+-  Markdown export
+-  Streamlit UI
 
 ---
 
-## 🏗️ Architecture
+##  Architecture
 
 ```text
                                          ┌──────────────┐
@@ -55,7 +60,7 @@
 
 ---
 
-## ⚙️ Tech Stack
+##  Tech Stack
 
 - Python
 - LangGraph
@@ -67,7 +72,7 @@
 
 ---
 
-## 📂 Project Structure
+##  Project Structure
 
 ```text
 .
@@ -80,7 +85,7 @@
 
 ---
 
-## ▶️ Run
+## ▶ Run
 
 ```bash
 pip install -r requirements.txt
@@ -94,12 +99,6 @@ GROQ_API_KEY=
 TAVILY_API_KEY=
 GOOGLE_API_KEY=
 ```
-
----
-
-## 📸 Demo
-
-> ![alt text](image.png)
 
 ---
 
