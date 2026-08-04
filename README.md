@@ -1,10 +1,10 @@
-# ✍️ TheWriterAgent
+#  TheWriterAgent
 
 > Multi-Agent AI Blog Writer built with LangGraph that researches, plans, writes, reviews, and generates images for technical blogs.
 
 ---
 
-## 📸 Demo
+##  Demo
 
 > ![alt text](image.png)
 
