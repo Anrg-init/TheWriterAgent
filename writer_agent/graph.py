@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from __future__ import annotations
 
 import operator
@@ -13,11 +12,9 @@ from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 
-from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
-from dotenv import load_dotenv
-
-load_dotenv()
+from .config import GOOGLE_IMAGE_MODEL, GOOGLE_MODEL, IMAGES_DIR, OUTPUT_DIR, ensure_output_dirs
 
 # Blog writing flow: router -> optional research -> orchestrator -> workers -> final markdown + image pass.
 # The image step is kept intentionally small and modular so it can be swapped out more easily.
@@ -107,7 +104,9 @@ class State(TypedDict):
 
 
 # 2) LLM
-llm = ChatGroq(model="llama-3.3-70b-versatile")
+def get_llm() -> ChatGoogleGenerativeAI:
+    """Create the provider client only when a graph run needs it."""
+    return ChatGoogleGenerativeAI(model=GOOGLE_MODEL)
 
 # 3) Router
 ROUTER_SYSTEM = """You are a routing module for a technical blog planner.
@@ -125,7 +124,7 @@ If needs_research=true:
 """
 
 def router_node(state: State) -> dict:
-    decider = llm.with_structured_output(RouterDecision)
+    decider = get_llm().with_structured_output(RouterDecision)
     decision = decider.invoke(
         [
             SystemMessage(content=ROUTER_SYSTEM),
@@ -155,8 +154,9 @@ def _tavily_search(query: str, max_results: int = 5) -> List[dict]:
     if not os.getenv("TAVILY_API_KEY"):
         return []
     try:
-        from langchain_community.tools.tavily_search import TavilySearchResults  # type: ignore
-        tool = TavilySearchResults(max_results=max_results)
+        from langchain_tavily import TavilySearch
+
+        tool = TavilySearch(max_results=max_results)
         results = tool.invoke({"query": query})
         out: List[dict] = []
         for r in results or []:
@@ -202,7 +202,7 @@ def research_node(state: State) -> dict:
     if not raw:
         return {"evidence": []}
 
-    extractor = llm.with_structured_output(EvidencePack)
+    extractor = get_llm().with_structured_output(EvidencePack)
     pack = extractor.invoke(
         [
             SystemMessage(content=RESEARCH_SYSTEM),
@@ -249,9 +249,13 @@ Output must match Plan schema.
 """
 
 def orchestrator_node(state: State) -> dict:
-    planner = llm.with_structured_output(Plan)
+    planner = get_llm().with_structured_output(Plan)
     mode = state.get("mode", "closed_book")
     evidence = state.get("evidence", [])
+    evidence_dicts = [
+        item.model_dump() if hasattr(item, "model_dump") else item
+        for item in evidence
+    ]
 
     forced_kind = "news_roundup" if mode == "open_book" else None
 
@@ -264,7 +268,7 @@ def orchestrator_node(state: State) -> dict:
                     f"Mode: {mode}\n"
                     f"As-of: {state['as_of']} (recency_days={state['recency_days']})\n"
                     f"{'Force blog_kind=news_roundup' if forced_kind else ''}\n\n"
-                    f"Evidence:\n{[e.model_dump() for e in evidence][:16]}"
+                    f"Evidence:\n{evidence_dicts[:16]}"
                 )
             ),
         ]
@@ -288,7 +292,10 @@ def fanout(state: State):
                 "as_of": state["as_of"],
                 "recency_days": state["recency_days"],
                 "plan": state["plan"].model_dump(),
-                "evidence": [e.model_dump() for e in state.get("evidence", [])],
+                "evidence": [
+                    e.model_dump() if hasattr(e, "model_dump") else e
+                    for e in state.get("evidence", [])
+                ],
             },
         )
         for task in state["plan"].tasks
@@ -317,6 +324,31 @@ Code:
 - If requires_code==true, include at least one minimal snippet.
 """
 
+
+def _message_content_to_text(message: object) -> str:
+    """Normalize LangChain text responses from Gemini and other providers."""
+    if isinstance(message, dict):
+        content = message.get("content", message)
+    else:
+        content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        chunks: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                chunks.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+                if isinstance(text, str):
+                    chunks.append(text)
+            else:
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    chunks.append(text)
+        return "\n".join(chunks).strip()
+    return str(content).strip()
+
 def worker_node(payload: dict) -> dict:
     task = Task(**payload["task"])
     plan = Plan(**payload["plan"])
@@ -328,7 +360,7 @@ def worker_node(payload: dict) -> dict:
         for e in evidence[:20]
     )
 
-    section_md = llm.invoke(
+    section_response = get_llm().invoke(
         [
             SystemMessage(content=WORKER_SYSTEM),
             HumanMessage(
@@ -353,7 +385,8 @@ def worker_node(payload: dict) -> dict:
                 )
             ),
         ]
-    ).content.strip()
+    )
+    section_md = _message_content_to_text(section_response)
 
     return {"sections": [(task.id, section_md)]}
 
@@ -382,28 +415,32 @@ Return strictly GlobalImagePlan.
 """
 
 def decide_images(state: State) -> dict:
-    planner = llm.with_structured_output(GlobalImagePlan)
     merged_md = state["merged_md"]
     plan = state["plan"]
     assert plan is not None
 
-    image_plan = planner.invoke(
-        [
-            SystemMessage(content=DECIDE_IMAGES_SYSTEM),
-            HumanMessage(
-                content=(
-                    f"Blog kind: {plan.blog_kind}\n"
-                    f"Topic: {state['topic']}\n\n"
-                    "Insert placeholders + propose image prompts.\n\n"
-                    f"{merged_md}"
-                )
-            ),
-        ]
-    )
+    try:
+        planner = get_llm().with_structured_output(GlobalImagePlan)
+        image_plan = planner.invoke(
+            [
+                SystemMessage(content=DECIDE_IMAGES_SYSTEM),
+                HumanMessage(
+                    content=(
+                        f"Blog kind: {plan.blog_kind}\n"
+                        f"Topic: {state['topic']}\n\n"
+                        "Insert placeholders + propose image prompts.\n\n"
+                        f"{merged_md}"
+                    )
+                ),
+            ]
+        )
+    except Exception:
+        # Image planning is optional; a provider parsing failure must not lose a completed article.
+        return {"md_with_placeholders": merged_md, "image_specs": []}
 
     return {
-        "md_with_placeholders": image_plan.md_with_placeholders,
-        "image_specs": [img.model_dump() for img in image_plan.images],
+        "md_with_placeholders": image_plan.md_with_placeholders or merged_md,
+        "image_specs": [img.model_dump() for img in image_plan.images[:3]],
     }
 
 
@@ -423,7 +460,7 @@ def _gemini_generate_image_bytes(prompt: str) -> bytes:
     client = genai.Client(api_key=api_key)
 
     resp = client.models.generate_content(
-        model="gemini-3.1-flash-image",
+        model=GOOGLE_IMAGE_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
@@ -455,11 +492,30 @@ def _gemini_generate_image_bytes(prompt: str) -> bytes:
     raise RuntimeError("No inline image bytes found in response.")
 
 
-def _safe_slug(title: str) -> str:
-    s = title.strip().lower()
+def _text_value(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(_text_value(item) for item in value if item is not None)
+    if isinstance(value, dict):
+        for key in ("text", "content", "title"):
+            if key in value:
+                return _text_value(value[key])
+    return str(value)
+
+
+def _safe_slug(title: object) -> str:
+    s = _text_value(title).strip().lower()
     s = re.sub(r"[^a-z0-9 _-]+", "", s)
     s = re.sub(r"\s+", "_", s).strip("_")
     return s or "blog"
+
+
+def _safe_image_filename(filename: str, index: int) -> str:
+    """Keep model-provided asset names inside the configured image directory."""
+    name = Path(filename).name
+    name = re.sub(r"[^a-zA-Z0-9._-]+", "_", name).strip("._")
+    return name or f"image_{index}.png"
 
 
 def generate_and_place_images(state: State) -> dict:
@@ -470,17 +526,18 @@ def generate_and_place_images(state: State) -> dict:
     image_specs = state.get("image_specs", []) or []
 
     # If no images requested, just write merged markdown
+    ensure_output_dirs()
+
     if not image_specs:
         filename = f"{_safe_slug(plan.blog_title)}.md"
-        Path(filename).write_text(md, encoding="utf-8")
+        (OUTPUT_DIR / filename).write_text(md, encoding="utf-8")
         return {"final": md}
 
-    images_dir = Path("images")
-    images_dir.mkdir(exist_ok=True)
+    images_dir = IMAGES_DIR
 
-    for spec in image_specs:
+    for index, spec in enumerate(image_specs, start=1):
         placeholder = spec["placeholder"]
-        filename = spec["filename"]
+        filename = _safe_image_filename(spec["filename"], index)
         out_path = images_dir / filename
 
         # generate only if needed
@@ -503,7 +560,7 @@ def generate_and_place_images(state: State) -> dict:
         md = md.replace(placeholder, img_md)
 
     filename = f"{_safe_slug(plan.blog_title)}.md"
-    Path(filename).write_text(md, encoding="utf-8")
+    (OUTPUT_DIR / filename).write_text(md, encoding="utf-8")
     return {"final": md}
 
 # build reducer subgraph
@@ -538,10 +595,3 @@ g.add_edge("reducer", END)
 app = g.compile()
 app
 
-=======
-"""Backward-compatible import for the Writer Agent graph."""
-
-from writer_agent.graph import app
-
-__all__ = ["app"]
->>>>>>> 2147a22 (fix/prod_issue)

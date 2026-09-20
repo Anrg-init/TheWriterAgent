@@ -1,51 +1,25 @@
-<<<<<<< HEAD
 from __future__ import annotations
 
 import json
-import os
 import re
-import zipfile
 from datetime import date
-from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Iterator, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 import pandas as pd
 import streamlit as st
 
 # Import the compiled LangGraph app.
-from backend import app
-
-
-# Helpers
-def safe_slug(title: str) -> str:
-    s = title.strip().lower()
-    s = re.sub(r"[^a-z0-9 _-]+", "", s)
-    s = re.sub(r"\s+", "_", s).strip("_")
-    return s or "blog"
-
-
-def bundle_zip(md_text: str, md_filename: str, images_dir: Path) -> bytes:
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr(md_filename, md_text.encode("utf-8"))
-
-        if images_dir.exists() and images_dir.is_dir():
-            for p in images_dir.rglob("*"):
-                if p.is_file():
-                    z.write(p, arcname=str(p))
-    return buf.getvalue()
-
-
-def images_zip(images_dir: Path) -> Optional[bytes]:
-    if not images_dir.exists() or not images_dir.is_dir():
-        return None
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        for p in images_dir.rglob("*"):
-            if p.is_file():
-                z.write(p, arcname=str(p))
-    return buf.getvalue()
+from writer_agent.config import IMAGES_DIR, OUTPUT_DIR
+from writer_agent.graph import app
+from writer_agent.storage import (
+    bundle_zip,
+    extract_title,
+    images_zip,
+    list_past_blogs,
+    read_markdown,
+    safe_slug,
+)
 
 
 def try_stream(graph_app, inputs: Dict[str, Any]) -> Iterator[Tuple[str, Any]]:
@@ -53,19 +27,16 @@ def try_stream(graph_app, inputs: Dict[str, Any]) -> Iterator[Tuple[str, Any]]:
     try:
         for step in graph_app.stream(inputs, stream_mode="updates"):
             yield ("updates", step)
-        out = graph_app.invoke(inputs)
-        yield ("final", out)
         return
-    except Exception:
+    except (TypeError, ValueError):
+        # Older graph implementations may not support the updates stream mode.
         pass
 
     try:
         for step in graph_app.stream(inputs, stream_mode="values"):
             yield ("values", step)
-        out = graph_app.invoke(inputs)
-        yield ("final", out)
         return
-    except Exception:
+    except (TypeError, ValueError):
         pass
 
     out = graph_app.invoke(inputs)
@@ -89,7 +60,7 @@ _CAPTION_LINE_RE = re.compile(r"^\*(?P<cap>.+)\*$")
 
 def _resolve_image_path(src: str) -> Path:
     src = src.strip().lstrip("./")
-    return Path(src).resolve()
+    return (OUTPUT_DIR / src).resolve()
 
 
 def render_markdown_with_local_images(md: str):
@@ -137,42 +108,15 @@ def render_markdown_with_local_images(md: str):
                     parts[i + 1] = ("md", rest)
 
         if src.startswith("http://") or src.startswith("https://"):
-            st.image(src, caption=caption or (alt or None), use_container_width=True)
+                st.image(src, caption=caption or (alt or None), width="stretch")
         else:
             img_path = _resolve_image_path(src)
             if img_path.exists():
-                st.image(str(img_path), caption=caption or (alt or None), use_container_width=True)
+                st.image(str(img_path), caption=caption or (alt or None), width="stretch")
             else:
                 st.warning(f"Image not found: `{src}` (looked for `{img_path}`)")
 
         i += 1
-
-
-# Past blogs helpers.
-def list_past_blogs() -> List[Path]:
-    """
-    Returns .md files in current working directory, newest first.
-    Filters out obvious non-blog markdown files if needed.
-    """
-    cwd = Path(".")
-    files = [p for p in cwd.glob("*.md") if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return files
-
-
-def read_md_file(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="replace")
-
-
-def extract_title_from_md(md: str, fallback: str) -> str:
-    """
-    Use first '# ' heading as title if present.
-    """
-    for line in md.splitlines():
-        if line.startswith("# "):
-            t = line[2:].strip()
-            return t or fallback
-    return fallback
 
 
 # Streamlit UI
@@ -203,8 +147,8 @@ with st.sidebar:
         file_by_label: Dict[str, Path] = {}
         for p in past_files[:50]:
             try:
-                md_text = read_md_file(p)
-                title = extract_title_from_md(md_text, p.stem)
+                md_text = read_markdown(p)
+                title = extract_title(md_text, p.stem)
             except Exception:
                 title = p.stem
             label = f"{title}  ·  {p.name}"
@@ -221,7 +165,7 @@ with st.sidebar:
 
         if st.button("📂 Load selected blog"):
             if selected_md_file:
-                md_text = read_md_file(selected_md_file)
+                md_text = read_markdown(selected_md_file)
                 # Load into session_state as if it were a run output
                 st.session_state["last_out"] = {
                     "plan": None,          # old files don't include plan
@@ -230,7 +174,7 @@ with st.sidebar:
                     "final": md_text,      # markdown body
                 }
                 # also update the topic input to the title (best-effort) without changing UI
-                st.session_state["topic_prefill"] = extract_title_from_md(md_text, selected_md_file.stem)
+                st.session_state["topic_prefill"] = extract_title(md_text, selected_md_file.stem)
 
     
 
@@ -282,35 +226,41 @@ if run_btn:
     current_state: Dict[str, Any] = {}
     last_node = None
 
-    for kind, payload in try_stream(app, inputs):
-        if kind in ("updates", "values"):
-            node_name = None
-            if isinstance(payload, dict) and len(payload) == 1 and isinstance(next(iter(payload.values())), dict):
-                node_name = next(iter(payload.keys()))
-            if node_name and node_name != last_node:
-                status.write(f"➡️ Node: `{node_name}`")
-                last_node = node_name
+    try:
+        for kind, payload in try_stream(app, inputs):
+            if kind in ("updates", "values"):
+                node_name = None
+                if isinstance(payload, dict) and len(payload) == 1 and isinstance(next(iter(payload.values())), dict):
+                    node_name = next(iter(payload.keys()))
+                if node_name and node_name != last_node:
+                    status.write(f"➡️ Node: `{node_name}`")
+                    last_node = node_name
 
-            current_state = extract_latest_state(current_state, payload)
+                current_state = extract_latest_state(current_state, payload)
 
-            summary = {
-                "mode": current_state.get("mode"),
-                "needs_research": current_state.get("needs_research"),
-                "queries": current_state.get("queries", [])[:5] if isinstance(current_state.get("queries"), list) else [],
-                "evidence_count": len(current_state.get("evidence", []) or []),
-                "tasks": len((current_state.get("plan") or {}).get("tasks", [])) if isinstance(current_state.get("plan"), dict) else None,
-                "images": len(current_state.get("image_specs", []) or []),
-                "sections_done": len(current_state.get("sections", []) or []),
-            }
-            progress_area.json(summary)
+                summary = {
+                    "mode": current_state.get("mode"),
+                    "needs_research": current_state.get("needs_research"),
+                    "queries": current_state.get("queries", [])[:5] if isinstance(current_state.get("queries"), list) else [],
+                    "evidence_count": len(current_state.get("evidence", []) or []),
+                    "tasks": len((current_state.get("plan") or {}).get("tasks", [])) if isinstance(current_state.get("plan"), dict) else None,
+                    "images": len(current_state.get("image_specs", []) or []),
+                    "sections_done": len(current_state.get("sections", []) or []),
+                }
+                progress_area.json(summary)
+                log(f"[{kind}] {json.dumps(payload, default=str)[:1200]}")
 
-            log(f"[{kind}] {json.dumps(payload, default=str)[:1200]}")
+            elif kind == "final":
+                current_state = payload
 
-        elif kind == "final":
-            out = payload
-            st.session_state["last_out"] = out
-            status.update(label="✅ Done", state="complete", expanded=False)
-            log("[final] received final state")
+        if current_state:
+            st.session_state["last_out"] = current_state
+        status.update(label="✅ Done", state="complete", expanded=False)
+        log("[final] received streamed state")
+    except Exception as error:
+        status.update(label="Generation failed", state="error", expanded=True)
+        st.error(f"Generation failed: {error}")
+        log(f"[error] {error}")
 
 # Render last result (if any)
 out = st.session_state.get("last_out")
@@ -351,7 +301,7 @@ if out:
                         for t in tasks
                     ]
                 ).sort_values("id")
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(df, hide_index=True)
 
                 with st.expander("Task details"):
                     st.json(tasks)
@@ -375,7 +325,7 @@ if out:
                         "url": e.get("url"),
                     }
                 )
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True)
 
     # --- Preview tab ---
     with tab_preview:
@@ -393,7 +343,7 @@ if out:
                 blog_title = plan_obj.get("blog_title", "blog")
             else:
                 # fallback: parse from markdown title
-                blog_title = extract_title_from_md(final_md, "blog")
+                blog_title = extract_title(final_md, "blog")
 
             md_filename = f"{safe_slug(blog_title)}.md"
             st.download_button(
@@ -403,7 +353,7 @@ if out:
                 mime="text/markdown",
             )
 
-            bundle = bundle_zip(final_md, md_filename, Path("images"))
+            bundle = bundle_zip(final_md, md_filename)
             st.download_button(
                 "📦 Download Bundle (MD + images)",
                 data=bundle,
@@ -415,7 +365,7 @@ if out:
     with tab_images:
         st.subheader("Images")
         specs = out.get("image_specs") or []
-        images_dir = Path("images")
+        images_dir = IMAGES_DIR
 
         if not specs and not images_dir.exists():
             st.info("No images generated for this blog.")
@@ -430,9 +380,9 @@ if out:
                     st.warning("images/ exists but is empty.")
                 else:
                     for p in sorted(files):
-                        st.image(str(p), caption=p.name, use_container_width=True)
+                        st.image(str(p), caption=p.name, width="stretch")
 
-                z = images_zip(images_dir)
+                z = images_zip()
                 if z:
                     st.download_button(
                         "⬇️ Download Images (zip)",
@@ -452,18 +402,3 @@ if out:
         st.text_area("Event log", value="\n\n".join(st.session_state["logs"][-80:]), height=520)
 else:
     st.info("Enter a topic and click **Generate Blog**.")
-=======
-"""Backward-compatible Streamlit entry point."""
-
-"""Streamlit entry point for The Writer Agent."""
-
-import runpy
-from pathlib import Path
-
-# Execute the page script on every Streamlit rerun. Unlike importing the module,
-# this does not depend on Python's module cache and cannot duplicate widgets.
-runpy.run_path(
-	str(Path(__file__).resolve().parent / "writer_agent" / "ui.py"),
-	init_globals={"__package__": "writer_agent"},
-)
->>>>>>> 2147a22 (fix/prod_issue)

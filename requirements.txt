@@ -1,9 +1,23 @@
 langchain
 langgraph
 langchain-community
+<<<<<<< HEAD
 langchain-google-genai
 google-generativeai
+=======
+langchain-tavily
+langchain-google-genai
+google-generativeai
+google-genai
+>>>>>>> 2147a22 (fix/prod_issue)
 huggingface_hub
 python-dotenv
 requests
 fastapi
+<<<<<<< HEAD
+=======
+streamlit
+pandas
+pydantic
+pytest
+>>>>>>> 2147a22 (fix/prod_issue)
