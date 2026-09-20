@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-.env
-myenv
-__pycache__
-=======
 # Environment and secrets
 .env
 .env.*
@@ -41,5 +36,4 @@ output/
 Thumbs.db
 .idea/
 .vscode/
->>>>>>> 2147a22 (fix/prod_issue)
 

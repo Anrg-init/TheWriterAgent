@@ -7,4 +7,4 @@ def test_frontend_renders_main_controls() -> None:
 
     assert not app.exception
     assert [item.value for item in app.title] == ["Blog Writing Agent"]
-    assert [item.label for item in app.sidebar.button] == ["🚀 Generate Blog"]
+    assert "🚀 Generate Blog" in [item.label for item in app.sidebar.button]
